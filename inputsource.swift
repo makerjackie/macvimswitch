@@ -20,92 +20,100 @@ class InputSource: Equatable {
     }
 
     var isCJKV: Bool {
-        if let lang = tisInputSource.sourceLanguages.first {
+        return tisInputSource.sourceLanguages.contains { lang in
             return lang == "ko" || lang == "ja" || lang == "vi" || lang.hasPrefix("zh")
         }
-        return false
     }
 
     init(tisInputSource: TISInputSource) {
         self.tisInputSource = tisInputSource
     }
 
-    func select() {
+    @discardableResult
+    func select() -> Bool {
         let currentSource = InputSourceManager.getCurrentSource()
-        if currentSource.id == self.id { return }
+        if currentSource.id == self.id {
+            if self.isCJKV {
+                usleep(InputSourceManager.cjkvSettleUSeconds)
+            }
+            InputSourceManager.forceRefreshInputContext()
+            return InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 80_000)
+        }
 
-        // 简化 CJKV 输入法切换逻辑
         if self.isCJKV {
-            switchCJKVSource()
+            return switchCJKVSource()
         } else {
-            selectWithRetry()
+            return selectWithRetry()
         }
     }
 
-    // 添加重试机制的切换方法
-    private func selectWithRetry(maxAttempts: Int = 2) {
+    private func selectWithRetry(maxAttempts: Int = 3) -> Bool {
         for attempt in 1...maxAttempts {
-            TISSelectInputSource(tisInputSource)
-            usleep(InputSourceManager.uSeconds)
-
-            // 验证切换是否成功
-            if InputSourceManager.getCurrentSource().id == self.id {
-                // 强制刷新输入上下文以确保立即生效
-                InputSourceManager.forceRefreshInputContext()
-                return
+            let status = TISSelectInputSource(tisInputSource)
+            if status != noErr {
+                print("切换输入法失败: \(id), status=\(status), attempt=\(attempt)")
             }
 
-            // 如果不是最后一次尝试，多等待一段时间再重试
+            if InputSourceManager.waitUntilCurrentSource(id: self.id) {
+                InputSourceManager.forceRefreshInputContext()
+                return InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 120_000)
+            }
+
             if attempt < maxAttempts {
-                usleep(InputSourceManager.uSeconds)
+                usleep(InputSourceManager.retryDelayUSeconds)
             }
         }
 
-        // 即使失败也尝试刷新一次
-        InputSourceManager.forceRefreshInputContext()
+        print("输入法切换未确认成功: \(id)")
+        return false
     }
 
-    private func switchCJKVSource() {
-        // 尝试直接切换到目标输入法
-        TISSelectInputSource(tisInputSource)
-        usleep(InputSourceManager.uSeconds)
-
-        // 验证切换是否成功
-        if InputSourceManager.getCurrentSource().id == self.id {
-            // 即使切换成功，也强制刷新输入上下文以确保立即生效
-            InputSourceManager.forceRefreshInputContext()
-            return
+    private func switchCJKVSource() -> Bool {
+        if selectWithRetry(maxAttempts: 2) {
+            return true
         }
 
-        // 如果切换失败，尝试通过非 CJKV 输入法中转
         if let nonCJKV = InputSourceManager.nonCJKVSource() {
-            TISSelectInputSource(nonCJKV.tisInputSource)
-            usleep(InputSourceManager.uSeconds)
-            TISSelectInputSource(tisInputSource)
-            usleep(InputSourceManager.uSeconds)
+            print("直接切换 CJKV 输入法未确认，尝试通过 \(nonCJKV.id) 中转")
+            _ = TISSelectInputSource(nonCJKV.tisInputSource)
+            _ = InputSourceManager.waitUntilCurrentSource(id: nonCJKV.id, timeoutUseconds: 120_000)
 
-            // 再次验证
-            if InputSourceManager.getCurrentSource().id == self.id {
-                // 强制刷新输入上下文
-                InputSourceManager.forceRefreshInputContext()
-                return
+            for attempt in 1...3 {
+                let status = TISSelectInputSource(tisInputSource)
+                if status != noErr {
+                    print("CJKV 中转切换失败: \(id), status=\(status), attempt=\(attempt)")
+                }
+
+                if InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 220_000) {
+                    usleep(InputSourceManager.cjkvSettleUSeconds)
+                    guard InputSourceManager.getCurrentSource().id == self.id else {
+                        continue
+                    }
+
+                    InputSourceManager.forceRefreshInputContext()
+                    return InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 120_000)
+                }
+
+                usleep(InputSourceManager.retryDelayUSeconds)
             }
 
-            // 最后一次尝试：等待更长时间再切换
-            usleep(InputSourceManager.uSeconds * 2)
-            TISSelectInputSource(tisInputSource)
-            usleep(InputSourceManager.uSeconds)
-
-            // 最后也强制刷新一次
-            InputSourceManager.forceRefreshInputContext()
+            if InputSourceManager.getCurrentSource().id == self.id {
+                InputSourceManager.forceRefreshInputContext()
+                return true
+            }
         }
+
+        print("CJKV 输入法切换未确认成功: \(id)")
+        return false
     }
 }
 
 // 修改 InputSourceManager 类
 class InputSourceManager {
     static var inputSources: [InputSource] = []
-    static var uSeconds: UInt32 = 20000  // 增加到20ms以提高稳定性
+    static var uSeconds: UInt32 = 20_000
+    static var retryDelayUSeconds: UInt32 = 45_000
+    static var cjkvSettleUSeconds: UInt32 = 80_000
     static var keyboardOnly: Bool = true
 
     static func initialize() {
@@ -180,43 +188,31 @@ class InputSourceManager {
         return nonCJKVSource()
     }
 
-    // 强制刷新输入上下文，确保输入法切换立即生效
-    static func forceRefreshInputContext() {
-        // 策略1: 通过多次重新选择当前输入法来强制系统刷新
-        // 这个方法比应用切换更轻量，但同样有效
-        let current = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
-
-        // 第一次：立即重选
-        TISSelectInputSource(current)
-        usleep(3000) // 3ms
-
-        // 第二次：再次重选以确保生效
-        TISSelectInputSource(current)
-        usleep(3000) // 3ms
-
-        // 策略2: 发送一个特殊的"空操作"键盘事件序列
-        // 使用 NSEventType.appKitDefined 或类似的无副作用事件
-        // 通过快速的修饰键按下-释放来触发输入上下文更新
-        sendRefreshKeySequence()
-    }
-
-    // 发送一个特殊的按键序列来刷新输入上下文
-    // 使用极短的修饰键脉冲，几乎不会被用户察觉
-    private static func sendRefreshKeySequence() {
-        let source = CGEventSource(stateID: .hidSystemState)
-
-        // 使用 Function 键 (0x3F) - 这是最不会干扰用户输入的修饰键
-        // 因为单独按 Fn 键通常不会触发任何操作
-        if let fnDown = CGEvent(keyboardEventSource: source, virtualKey: 0x3F, keyDown: true) {
-            fnDown.post(tap: .cghidEventTap)
-            usleep(500) // 0.5ms - 极短的延迟
-
-            if let fnUp = CGEvent(keyboardEventSource: source, virtualKey: 0x3F, keyDown: false) {
-                fnUp.post(tap: .cghidEventTap)
+    static func waitUntilCurrentSource(
+        id: String,
+        timeoutUseconds: UInt32 = 180_000,
+        pollIntervalUseconds: UInt32 = 10_000
+    ) -> Bool {
+        var waited: UInt32 = 0
+        while waited <= timeoutUseconds {
+            if getCurrentSource().id == id {
+                return true
             }
+
+            usleep(pollIntervalUseconds)
+            waited += pollIntervalUseconds
         }
 
-        usleep(2000) // 2ms - 让系统处理事件
+        return false
+    }
+
+    static func forceRefreshInputContext() {
+        let current = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+
+        _ = TISSelectInputSource(current)
+        usleep(5_000)
+        _ = TISSelectInputSource(current)
+        usleep(10_000)
     }
 }
 
@@ -272,7 +268,15 @@ class KeyboardManager {
         static let esc: Int64 = 0x35
         static let j: Int64 = 0x26
         static let k: Int64 = 0x28
+        static let space: Int64 = 0x31
+        static let openBracket: Int64 = 0x21
+        static let capsLock: Int64 = 0x39
+        static let q: Int64 = 0x0C
+        static let h: Int64 = 0x23
     }
+
+    // 自定义快捷键管理器
+    private let customShortcutManager = CustomShortcutManager.shared
 
     var englishInputSource: String {
         get { UserPreferences.shared.selectedEnglishInputMethod }
@@ -335,6 +339,9 @@ class KeyboardManager {
         initializeInputSources()
         setupEventTap()
 
+        // 设置自定义快捷键管理器的代理
+        customShortcutManager.delegate = self
+
         // 检查当前输入法，如果是英文且有保存的上一个输入法，则更新 lastInputSource
         let currentSource = InputSourceManager.getCurrentSource()
         if currentSource.id == englishInputSource,
@@ -353,33 +360,11 @@ class KeyboardManager {
             return
         }
 
-        // 获取所有可用的输入源
-        guard let inputSources = TISCreateInputSourceList(nil, true)?.takeRetainedValue() as? [TISInputSource] else {
-            print("Failed to get input sources")
-            return
-        }
-
-        // 过滤出键盘输入源
-        let keyboardSources = inputSources.filter { source in
-            guard let categoryRef = TISGetInputSourceProperty(source, kTISPropertyInputSourceCategory),
-                  let category = (Unmanaged<CFString>.fromOpaque(categoryRef).takeUnretainedValue() as NSString) as String? else {
-                return false
-            }
-            return category == kTISCategoryKeyboardInputSource as String
-        }
-
-        // 找到第一个非 ABC 的中文输入法
-        for source in keyboardSources {
-            guard let sourceIdRef = TISGetInputSourceProperty(source, kTISPropertyInputSourceID),
-                  let sourceId = (Unmanaged<CFString>.fromOpaque(sourceIdRef).takeUnretainedValue() as NSString) as String? else {
-                continue
-            }
-
-            if sourceId != englishInputSource {
-                lastInputSource = sourceId
-                print("Found Chinese input source: \(sourceId)")
-                break
-            }
+        if let source = InputSourceManager.inputSources.first(where: { $0.id != englishInputSource && $0.isCJKV }) {
+            lastInputSource = source.id
+            print("Found CJKV input source: \(source.id)")
+        } else {
+            print("No CJKV input source found. Please select one from the menu.")
         }
 
         print("Initialized with input source: \(lastInputSource ?? "none")")
@@ -410,7 +395,7 @@ class KeyboardManager {
     }
 
     private let eventCallback: CGEventTapCallBack = { proxy, type, event, refcon in
-        guard let refcon = refcon else { return Unmanaged.passRetained(event) }
+        guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
         let manager = Unmanaged<KeyboardManager>.fromOpaque(refcon).takeUnretainedValue()
 
         switch type {
@@ -418,9 +403,19 @@ class KeyboardManager {
             manager.handleKeyDown(true)
 
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            manager.handleJkSequence(keyCode: keyCode, flags: event.flags)
+            let flags = event.flags
 
-            if keyCode == KeyboardManager.KeyCode.esc { // ESC key
+            // 首先处理自定义快捷键
+            if let shortcutType = manager.customShortcutManager.handleKeyEvent(keyCode: keyCode, flags: flags, isKeyDown: true) {
+                print("🎯 检测到自定义快捷键: \(shortcutType.displayName)")
+                // 通过委托方法处理快捷键触发
+                manager.customShortcutManager.delegate?.shortcutManagerDidTriggerAction(shortcutType)
+            } else {
+                manager.handleJkSequence(keyCode: keyCode, flags: flags)
+            }
+
+            // 处理传统 ESC 键
+            if keyCode == KeyboardManager.KeyCode.esc {
                 print("ESC key pressed")
                 // 检查是否应该切换输入法
                 if let delegate = manager.delegate,
@@ -434,6 +429,15 @@ class KeyboardManager {
 
         case .flagsChanged:
             let flags = event.flags
+            let previousFlags = manager.lastFlags
+
+            // 处理自定义快捷键的修饰键变化
+            if let shortcutType = manager.customShortcutManager.handleModifierChange(flags: flags, previousFlags: previousFlags) {
+                print("🎯 检测到自定义快捷键 (修饰键): \(shortcutType.displayName)")
+                // 通过委托方法处理快捷键触发
+                manager.customShortcutManager.delegate?.shortcutManagerDidTriggerAction(shortcutType)
+            }
+
             manager.handleModifierFlags(flags)
 
         default:
@@ -441,7 +445,7 @@ class KeyboardManager {
         }
 
         // 总是让事件继续传播
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     func switchInputMethod() {
@@ -451,14 +455,20 @@ class KeyboardManager {
             // 从英文切换到保存的输入法
             if let lastSource = lastInputSource,
                let targetSource = InputSourceManager.getInputSource(name: lastSource) {
-                targetSource.select()
+                guard targetSource.select() else {
+                    print("切换到保存的输入法失败: \(lastSource)")
+                    return
+                }
             }
         } else {
             // 从其他输入法切换到英文
             lastInputSource = currentSource.id
             UserPreferences.shared.selectedInputMethod = currentSource.id
             if let englishSource = InputSourceManager.getInputSource(name: englishInputSource) {
-                englishSource.select()
+                guard englishSource.select() else {
+                    print("切换到英文输入法失败: \(englishInputSource)")
+                    return
+                }
             }
         }
 
@@ -475,15 +485,25 @@ class KeyboardManager {
 
     // 添加新方法：专门用于ESC键的切换
     func switchToEnglish() {
+        print("⌨️ KeyboardManager: 开始切换到英文输入法")
         if let englishSource = InputSourceManager.getInputSource(name: englishInputSource) {
             let currentSource = InputSourceManager.getCurrentSource()
+            print("⌨️ 当前输入法: \(currentSource.id), 目标英文输入法: \(englishInputSource)")
             if currentSource.id != englishInputSource {
                 // 保存当前输入法作为lastInputSource
                 lastInputSource = currentSource.id
-                print("保存上一个输入法: \(currentSource.id)")
-                InputSource(tisInputSource: englishSource.tisInputSource).select()
-                delegate?.keyboardManagerDidUpdateState()
+                print("⌨️ 保存上一个输入法: \(currentSource.id)")
+                if englishSource.select() {
+                    delegate?.keyboardManagerDidUpdateState()
+                    print("⌨️ 已切换到英文输入法")
+                } else {
+                    print("⚠️ 英文输入法切换未确认成功: \(englishInputSource)")
+                }
+            } else {
+                print("⌨️ 当前已经是英文输入法，无需切换")
             }
+        } else {
+            print("⚠️ 找不到英文输入法: \(englishInputSource)")
         }
     }
 
@@ -675,6 +695,49 @@ class KeyboardManager {
     func disableEventTap() {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
+        }
+    }
+
+    // MARK: - CustomShortcutManagerDelegate
+
+    /// 获取所有启用的快捷键
+    func getEnabledCustomShortcuts() -> Set<CustomShortcutType> {
+        return UserPreferences.shared.getEnabledCustomShortcuts()
+    }
+
+    /// 设置启用的快捷键
+    func setEnabledCustomShortcuts(_ types: Set<CustomShortcutType>) {
+        UserPreferences.shared.setEnabledCustomShortcuts(types)
+        // 缓存刷新已在 UserPreferences 中处理
+        delegate?.keyboardManagerDidUpdateState()
+    }
+
+    /// 检查特定快捷键是否启用
+    func isCustomShortcutEnabled(_ type: CustomShortcutType) -> Bool {
+        return UserPreferences.shared.isCustomShortcutEnabled(type)
+    }
+
+    /// 设置特定快捷键的启用状态
+    func setCustomShortcutEnabled(_ type: CustomShortcutType, enabled: Bool) {
+        UserPreferences.shared.setCustomShortcutEnabled(type, enabled: enabled)
+        // 缓存刷新已在 UserPreferences 中处理
+        delegate?.keyboardManagerDidUpdateState()
+    }
+}
+
+// MARK: - CustomShortcutManagerDelegate Extension
+extension KeyboardManager: ShortcutManagerDelegate {
+    func shortcutManagerDidTriggerAction(_ type: CustomShortcutType) {
+        // 当自定义快捷键被触发时，检查是否应该切换输入法
+        print("🔥 KeyboardManager: 快捷键触发 \(type.displayName)")
+
+        // 检查是否应该切换输入法
+        if let delegate = delegate,
+           delegate.shouldSwitchInputSource() {
+            print("🔥 满足切换条件，执行切换到英文输入法")
+            switchToEnglish()
+        } else {
+            print("⚠️ 不满足切换条件，跳过输入法切换")
         }
     }
 }

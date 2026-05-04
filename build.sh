@@ -27,6 +27,7 @@ cp Info.plist dist/MacVimSwitch.app/Contents/
 echo "构建 ARM64 版本..."
 if ! swiftc -o dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-arm64 \
   inputsource.swift \
+  CustomShortcutManager.swift \
   main.swift \
   AppDelegate.swift \
   StatusBarManager.swift \
@@ -50,6 +51,7 @@ fi
 echo "构建 x86_64 版本..."
 if ! swiftc -o dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-x86_64 \
   inputsource.swift \
+  CustomShortcutManager.swift \
   main.swift \
   AppDelegate.swift \
   StatusBarManager.swift \
@@ -100,9 +102,9 @@ cat > dist/MacVimSwitch.app/Contents/Info.plist << EOL
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.6.5</string>
+    <string>0.7.3</string>
     <key>CFBundleVersion</key>
-    <string>0.6.5</string>
+    <string>0.7.3</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>LSUIElement</key>

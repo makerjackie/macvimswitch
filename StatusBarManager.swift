@@ -21,16 +21,18 @@ class StatusBarManager {
             return
         }
 
-        if KeyboardManager.shared.useShiftSwitch {
-            button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "MacVimSwitch (Shift Enabled)")
-        } else {
+        let enabledShortcuts = KeyboardManager.shared.getEnabledCustomShortcuts()
+        if enabledShortcuts.isEmpty {
             button.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "MacVimSwitch")
+        } else {
+            button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "MacVimSwitch (\(enabledShortcuts.count) shortcuts enabled)")
         }
 
         button.isEnabled = true
     }
 
     func createAndShowMenu() {
+        print("开始创建菜单...")
         let newMenu = NSMenu()
 
         let homepageItem = NSMenuItem(title: "使用说明", action: #selector(openHomepage), keyEquivalent: "")
@@ -39,6 +41,7 @@ class StatusBarManager {
 
         newMenu.addItem(NSMenuItem.separator())
 
+        print("添加输入法菜单...")
         // 添加输入法选择子菜单
         let inputMethodMenu = NSMenu()
         let inputMethodItem = NSMenuItem(title: "选择中文输入法", action: nil, keyEquivalent: "")
@@ -124,25 +127,50 @@ class StatusBarManager {
             newMenu.addItem(NSMenuItem.separator())
         }
 
-        // 修改 Shift 切换选项的文字
-        let shiftSwitchItem = NSMenuItem(
-            title: "使用 Shift 切换输入法",
-            action: #selector(toggleShiftSwitch),
+        print("添加简化的自定义快捷键菜单...")
+        // 添加自定义快捷键子菜单 - 修复版本
+        let shortcutsMenu = NSMenu()
+        let shortcutsMenuItem = NSMenuItem(title: "快捷键设置", action: nil, keyEquivalent: "")
+        shortcutsMenuItem.submenu = shortcutsMenu
+
+        // 添加基础的快捷键选项（暂时不获取启用状态）
+        let basicShortcuts: [(CustomShortcutType, String)] = [
+            (.commandSpace, "Command+Space → ESC"),
+            (.capsLock, "CapsLock → ESC"),
+            (.ctrlOpenBracket, "Ctrl+[ → ESC"),
+            (.jkSequence, "JK 序列 → ESC"),
+            (.singleShift, "单击 Shift → ESC")
+        ]
+
+        for (shortcutType, displayName) in basicShortcuts {
+            let item = NSMenuItem(
+                title: displayName,
+                action: #selector(toggleCustomShortcut(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = shortcutType
+            item.target = self
+
+            // 获取真实的启用状态
+            let isEnabled = UserPreferences.shared.isCustomShortcutEnabled(shortcutType)
+            item.state = isEnabled ? .on : .off
+
+            shortcutsMenu.addItem(item)
+            print("添加快捷键菜单项: \(displayName) - 状态: \(isEnabled ? "启用" : "禁用")")
+        }
+
+        // 添加分隔线和重置选项
+        shortcutsMenu.addItem(NSMenuItem.separator())
+
+        let resetShortcutsItem = NSMenuItem(
+            title: "重置为默认设置",
+            action: #selector(resetShortcutsToDefault),
             keyEquivalent: ""
         )
-        shiftSwitchItem.target = self
-        shiftSwitchItem.state = KeyboardManager.shared.useShiftSwitch ? .on : .off
-        newMenu.addItem(shiftSwitchItem)
+        resetShortcutsItem.target = self
+        shortcutsMenu.addItem(resetShortcutsItem)
 
-        let jkSwitchItem = NSMenuItem(
-            title: "使用 jk 切换输入法",
-            action: #selector(toggleJkSwitch),
-            keyEquivalent: ""
-        )
-        jkSwitchItem.target = self
-        jkSwitchItem.state = KeyboardManager.shared.useJkSwitch ? .on : .off
-        newMenu.addItem(jkSwitchItem)
-
+        newMenu.addItem(shortcutsMenuItem)
         newMenu.addItem(NSMenuItem.separator())
 
         // 添加开机启动选项
@@ -169,8 +197,10 @@ class StatusBarManager {
         quitItem.target = NSApp
         newMenu.addItem(quitItem)
 
+        print("设置状态栏菜单...")
         statusItem.menu = newMenu
         self.menu = newMenu
+        print("菜单创建完成！")
     }
 
     @objc private func openHomepage() {
@@ -179,16 +209,44 @@ class StatusBarManager {
         }
     }
 
-    @objc private func toggleShiftSwitch() {
-        KeyboardManager.shared.useShiftSwitch = !KeyboardManager.shared.useShiftSwitch
-        UserPreferences.shared.useShiftSwitch = KeyboardManager.shared.useShiftSwitch
+    @objc private func toggleCustomShortcut(_ sender: NSMenuItem) {
+        guard let shortcutType = sender.representedObject as? CustomShortcutType else {
+            print("无法获取快捷键类型")
+            return
+        }
+
+        print("切换快捷键: \(shortcutType.displayName)")
+
+        // 获取当前状态
+        let isEnabled = UserPreferences.shared.isCustomShortcutEnabled(shortcutType)
+        let newState = !isEnabled
+
+        // 设置新状态
+        UserPreferences.shared.setCustomShortcutEnabled(shortcutType, enabled: newState)
+
+        // 更新UI
+        sender.state = newState ? .on : .off
         updateStatusBarIcon()
         createAndShowMenu()
+
+        print("快捷键 \(shortcutType.displayName) 已\(newState ? "启用" : "禁用")")
     }
 
-    @objc private func toggleJkSwitch() {
-        KeyboardManager.shared.useJkSwitch = !KeyboardManager.shared.useJkSwitch
-        createAndShowMenu()
+    @objc private func resetShortcutsToDefault() {
+        let alert = NSAlert()
+        alert.messageText = "重置快捷键设置"
+        alert.informativeText = "确定要重置所有快捷键设置为默认值吗？\n\n默认启用：单击 Shift → ESC"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            // 重置为默认设置（只启用 Shift）
+            UserPreferences.shared.setEnabledCustomShortcuts([.singleShift])
+            updateStatusBarIcon()
+            createAndShowMenu()
+            print("快捷键设置已重置为默认值")
+        }
     }
 
     @objc private func selectCJKVInputMethod(_ sender: NSMenuItem) {
