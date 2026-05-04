@@ -41,6 +41,7 @@ jobs:
           CustomShortcutManager.swift \
           main.swift \
           AppDelegate.swift \
+          AppSelectionWindowController.swift \
           StatusBarManager.swift \
           InputMethodManager.swift \
           UserPreferences.swift \
@@ -62,6 +63,7 @@ jobs:
           CustomShortcutManager.swift \
           main.swift \
           AppDelegate.swift \
+          AppSelectionWindowController.swift \
           StatusBarManager.swift \
           InputMethodManager.swift \
           UserPreferences.swift \

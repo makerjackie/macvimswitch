@@ -3,6 +3,7 @@ import Cocoa
 class StatusBarManager {
     let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var menu: NSMenu?
+    private var appSelectionWindowController: AppSelectionWindowController?
     weak var appDelegate: AppDelegate?
 
     func setupStatusBarItem() {
@@ -108,6 +109,11 @@ class StatusBarManager {
             let appsMenuItem = NSMenuItem(title: "Esc生效的应用", action: nil, keyEquivalent: "")
             appsMenuItem.submenu = appsMenu
 
+            let manageAppsItem = NSMenuItem(title: "批量管理应用...", action: #selector(openAppSelectionWindow), keyEquivalent: "")
+            manageAppsItem.target = self
+            appsMenu.addItem(manageAppsItem)
+            appsMenu.addItem(NSMenuItem.separator())
+
             // 添加所有应用到子菜单
             for app in delegate.systemApps {
                 let item = NSMenuItem(title: app.name, action: #selector(AppDelegate.toggleApp(_:)), keyEquivalent: "")
@@ -207,6 +213,20 @@ class StatusBarManager {
         if let url = URL(string: "https://github.com/Jackiexiao/macvimswitch") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @objc private func openAppSelectionWindow() {
+        guard let delegate = appDelegate else { return }
+
+        if appSelectionWindowController == nil {
+            appSelectionWindowController = AppSelectionWindowController(appDelegate: delegate)
+        } else {
+            appSelectionWindowController?.reloadApps()
+        }
+
+        appSelectionWindowController?.showWindow(nil)
+        appSelectionWindowController?.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func toggleCustomShortcut(_ sender: NSMenuItem) {

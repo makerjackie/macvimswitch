@@ -8,6 +8,7 @@ MacVimSwitch is a utility for macOS that automatically switches input sources, d
 ## Features
 
 - Automatically switches to ABC input method when pressing ESC
+- Optional `Ctrl+[` mode sends a real ESC event for MacVim, VSCodeVim, and similar Vim environments
 - Optional `jk` chord to trigger the same ESC switching, matching common Vim insert-mode mappings
 - Built-in Shift key switching feature (enabled by default), switch between ABC English input method and Chinese/Japanese/Korean/Vietnamese input method
   - Important: Before using, please disable the "Use Shift to switch between English and Chinese/Japanese/Korean/Vietnamese" option in your input method settings
@@ -64,8 +65,9 @@ Download from [GitHub Releases](https://github.com/Jackiexiao/macvimswitch/relea
      - View instructions
      - Select your preferred Chinese input method
      - Enable/Disable Shift key switching
+     - Enable/Disable `Ctrl+[` ESC mode
      - Enable/Disable `jk` ESC mode
-     - Select the applications that you want to enable `Esc` to switch input source, by default, vscode, terminal, obsidian, cursor, windsurf, warp are enabled.
+     - Select the applications that you want to enable `Esc` to switch input source, with search and batch selection in the app manager.
      - Enable/Disable launch at login
      - Quit the application
 

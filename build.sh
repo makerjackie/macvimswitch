@@ -30,6 +30,7 @@ if ! swiftc -o dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-arm64 \
   CustomShortcutManager.swift \
   main.swift \
   AppDelegate.swift \
+  AppSelectionWindowController.swift \
   StatusBarManager.swift \
   InputMethodManager.swift \
   UserPreferences.swift \
@@ -54,6 +55,7 @@ if ! swiftc -o dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-x86_64 \
   CustomShortcutManager.swift \
   main.swift \
   AppDelegate.swift \
+  AppSelectionWindowController.swift \
   StatusBarManager.swift \
   InputMethodManager.swift \
   UserPreferences.swift \
@@ -102,9 +104,9 @@ cat > dist/MacVimSwitch.app/Contents/Info.plist << EOL
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.7.4</string>
+    <string>0.7.5</string>
     <key>CFBundleVersion</key>
-    <string>0.7.4</string>
+    <string>0.7.5</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>LSUIElement</key>

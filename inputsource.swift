@@ -326,6 +326,11 @@ class KeyboardManager {
     private var waitingForKAfterJ = false             // 记录是否等待 k 以组成 jk 序列
     private var lastJKeyTime: TimeInterval = 0        // 记录最近一次 j 键的时间
     private static let JK_SEQUENCE_WINDOW: TimeInterval = 0.35
+    private var pendingShiftSwitchWorkItem: DispatchWorkItem?
+    private var pendingShiftSwitchScheduledAt: TimeInterval = 0
+    private var shouldSkipCurrentShiftRelease = false
+    private static let SHIFT_DOUBLE_TAP_WINDOW: TimeInterval = 0.32
+    private var suppressNextCtrlOpenBracketKeyUp = false
 
     private init() {
         // 从 UserPreferences 加载配置
@@ -408,8 +413,14 @@ class KeyboardManager {
             // 首先处理自定义快捷键
             if let shortcutType = manager.customShortcutManager.handleKeyEvent(keyCode: keyCode, flags: flags, isKeyDown: true) {
                 print("🎯 检测到自定义快捷键: \(shortcutType.displayName)")
-                // 通过委托方法处理快捷键触发
-                manager.customShortcutManager.delegate?.shortcutManagerDidTriggerAction(shortcutType)
+                if shortcutType == .ctrlOpenBracket {
+                    if manager.handleCtrlOpenBracketShortcut() {
+                        return nil
+                    }
+                } else {
+                    // 通过委托方法处理快捷键触发
+                    manager.customShortcutManager.delegate?.shortcutManagerDidTriggerAction(shortcutType)
+                }
             } else {
                 manager.handleJkSequence(keyCode: keyCode, flags: flags)
             }
@@ -425,6 +436,10 @@ class KeyboardManager {
             }
 
         case .keyUp:
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            if manager.shouldSuppressCtrlOpenBracketKeyUp(keyCode: keyCode) {
+                return nil
+            }
             manager.handleKeyDown(false)
 
         case .flagsChanged:
@@ -446,6 +461,44 @@ class KeyboardManager {
 
         // 总是让事件继续传播
         return Unmanaged.passUnretained(event)
+    }
+
+    private func handleCtrlOpenBracketShortcut() -> Bool {
+        guard let delegate = delegate,
+              delegate.shouldSwitchInputSource() else {
+            return false
+        }
+
+        print("⌨️ Ctrl+[ 已启用，发送 ESC 并切换到英文输入法")
+        switchToEnglish()
+        suppressNextCtrlOpenBracketKeyUp = true
+        postEscKeyPress()
+        return true
+    }
+
+    private func shouldSuppressCtrlOpenBracketKeyUp(keyCode: Int64) -> Bool {
+        guard suppressNextCtrlOpenBracketKeyUp,
+              keyCode == KeyboardManager.KeyCode.openBracket else {
+            return false
+        }
+
+        suppressNextCtrlOpenBracketKeyUp = false
+        return true
+    }
+
+    private func postEscKeyPress() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let escKey = CGKeyCode(KeyboardManager.KeyCode.esc)
+
+        if let down = CGEvent(keyboardEventSource: source, virtualKey: escKey, keyDown: true) {
+            down.flags = []
+            down.post(tap: .cghidEventTap)
+        }
+
+        if let up = CGEvent(keyboardEventSource: source, virtualKey: escKey, keyDown: false) {
+            up.flags = []
+            up.post(tap: .cghidEventTap)
+        }
     }
 
     func switchInputMethod() {
@@ -558,6 +611,14 @@ class KeyboardManager {
     }
 
     private func handleShiftPress(_ time: TimeInterval) {
+        if let pending = pendingShiftSwitchWorkItem,
+           time - pendingShiftSwitchScheduledAt <= KeyboardManager.SHIFT_DOUBLE_TAP_WINDOW {
+            pending.cancel()
+            pendingShiftSwitchWorkItem = nil
+            shouldSkipCurrentShiftRelease = true
+            print("检测到双击 Shift，跳过 MacVimSwitch 单击 Shift 切换")
+        }
+
         if !isShiftPressed {
             isShiftPressed = true
             shiftPressStartTime = time
@@ -569,12 +630,45 @@ class KeyboardManager {
         if isShiftPressed {
             let pressDuration = time - shiftPressStartTime
             // print("Shift 释放 - hasOtherKeysDuringShift: \(hasOtherKeysDuringShift), pressDuration: \(pressDuration)")
-            if useShiftSwitch && !hasOtherKeysDuringShift && pressDuration < 0.5 {
-                switchInputMethod()
+            if shouldSkipCurrentShiftRelease {
+                print("双击 Shift 已交给当前应用处理")
+            } else if useShiftSwitch && !hasOtherKeysDuringShift && pressDuration < 0.5 {
+                if shouldDelaySingleShiftSwitchForDoubleTap() {
+                    scheduleSingleShiftSwitch(time)
+                } else {
+                    switchInputMethod()
+                }
             }
         }
         isShiftPressed = false
         hasOtherKeysDuringShift = false
+        shouldSkipCurrentShiftRelease = false
+    }
+
+    private func shouldDelaySingleShiftSwitchForDoubleTap() -> Bool {
+        guard let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier else {
+            return false
+        }
+
+        return bundleId.hasPrefix("com.jetbrains.") ||
+               bundleId == "com.google.android.studio"
+    }
+
+    private func scheduleSingleShiftSwitch(_ time: TimeInterval) {
+        pendingShiftSwitchWorkItem?.cancel()
+        pendingShiftSwitchScheduledAt = time
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.pendingShiftSwitchWorkItem = nil
+            self.switchInputMethod()
+        }
+
+        pendingShiftSwitchWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + KeyboardManager.SHIFT_DOUBLE_TAP_WINDOW,
+            execute: workItem
+        )
     }
 
     private func handleJkSequence(keyCode: Int64, flags: CGEventFlags) {
