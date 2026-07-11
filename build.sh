@@ -1,5 +1,8 @@
 #!/bin/bash
 
+VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)}"
+SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
+
 # 检查 Swift 编译器是否可用
 if ! command -v swiftc &> /dev/null; then
     echo "错误: 未找到 Swift 编译器。请确保已安装 Xcode 命令行工具。"
@@ -104,9 +107,9 @@ cat > dist/MacVimSwitch.app/Contents/Info.plist << EOL
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.7.5</string>
+    <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>0.7.5</string>
+    <string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>LSUIElement</key>
@@ -134,28 +137,21 @@ cat > entitlements.plist << EOL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict>
-    <key>com.apple.security.automation.apple-events</key>
-    <true/>
-    <key>com.apple.security.temporary-exception.apple-events</key>
-    <array>
-        <string>com.apple.systemevents</string>
-    </array>
-    <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-</dict>
+<dict/>
 </plist>
 EOL
 
 # 设置执行权限
 chmod +x dist/MacVimSwitch.app/Contents/MacOS/macvimswitch
 
-# 使用自签名
-if ! codesign --force --deep --sign - --entitlements entitlements.plist dist/MacVimSwitch.app; then
+# 本地开发默认使用 ad-hoc 签名；发布时通过 SIGNING_IDENTITY 指定
+# Developer ID Application，并启用 Hardened Runtime 与安全时间戳。
+codesign_args=(--force --deep --options runtime --sign "$SIGNING_IDENTITY" --entitlements entitlements.plist)
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    codesign_args+=(--timestamp)
+fi
+
+if ! codesign "${codesign_args[@]}" dist/MacVimSwitch.app; then
     echo "签名失败。请确保你的开发环境正确配置。"
     exit 1
 fi
@@ -163,6 +159,7 @@ fi
 # 创建 DMG（可选）
 if [ "$1" = "--create-dmg" ]; then
     # 创建临时挂载点
+    rm -rf /tmp/dmg
     mkdir -p /tmp/dmg
 
     # 创建应用程序文件夹符号链接

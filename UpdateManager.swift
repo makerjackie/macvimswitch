@@ -6,6 +6,7 @@ class UpdateManager {
 
     private let currentVersion: String
     private let githubRepo = "makerjackie/macvimswitch"
+    private let updateRequestTimeout: TimeInterval = 15
     private var updateCheckTimer: Timer?
 
     private init() {
@@ -59,22 +60,31 @@ class UpdateManager {
     }
 
     private func fetchLatestVersion() async throws -> String? {
-        let url = URL(string: "https://api.github.com/repos/\(githubRepo)/releases/latest")!
+        // GitHub's public REST API is limited to 60 unauthenticated requests
+        // per hour per IP. The stable releases/latest redirect is not subject
+        // to that API quota and its final URL contains the latest tag.
+        let url = URL(string: "https://github.com/\(githubRepo)/releases/latest")!
         var request = URLRequest(url: url)
-        request.setValue("application/vnd.github.v3+json", forHTTPHeaderField: "Accept")
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = updateRequestTimeout
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("MacVimSwitch/\(currentVersion)", forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await URLSession.shared.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200 else {
+              (200..<400).contains(httpResponse.statusCode),
+              let finalURL = httpResponse.url else {
             throw UpdateError.networkError
         }
 
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tagName = json["tag_name"] as? String else {
+        let components = finalURL.pathComponents
+        guard let tagIndex = components.lastIndex(of: "tag"),
+              components.indices.contains(tagIndex + 1) else {
             throw UpdateError.parseError
         }
 
+        let tagName = components[tagIndex + 1]
         // Remove 'v' prefix if present
         return tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
     }
@@ -99,7 +109,7 @@ class UpdateManager {
     private func showUpdateAlert(newVersion: String) {
         let alert = NSAlert()
         alert.messageText = "新版本可用"
-        alert.informativeText = "MacVimSwitch \(newVersion) 已发布。当前版本: \(currentVersion)\n\n是否前往下载?"
+        alert.informativeText = "MacVimSwitch \(newVersion) 已发布。当前版本: \(currentVersion)\n\n是否下载最新的 DMG 安装包?"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "下载")
         alert.addButton(withTitle: "稍后提醒")
@@ -107,8 +117,8 @@ class UpdateManager {
 
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            // Open releases page
-            if let url = URL(string: "https://github.com/\(githubRepo)/releases/latest") {
+            // This stable URL redirects to the DMG asset of the latest release.
+            if let url = URL(string: "https://github.com/\(githubRepo)/releases/latest/download/MacVimSwitch.dmg") {
                 NSWorkspace.shared.open(url)
             }
         } else if response == .alertThirdButtonReturn {

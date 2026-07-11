@@ -1,238 +1,103 @@
-name: Build and Release
+name: Signed Build and Release
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  release:
     runs-on: macos-latest
+    timeout-minutes: 60
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Setup Xcode
-      uses: maxim-lobanov/setup-xcode@v1
-      with:
-        xcode-version: latest-stable
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.RELEASE_KEYCHAIN_PASSWORD }}
+        run: |
+          test -n "$CERTIFICATE_BASE64"
+          echo "$CERTIFICATE_BASE64" | /usr/bin/base64 -D > "$RUNNER_TEMP/developer-id.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/release.keychain-db"
+          security set-keychain-settings -lut 21600 "$RUNNER_TEMP/release.keychain-db"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$RUNNER_TEMP/release.keychain-db"
+          security import "$RUNNER_TEMP/developer-id.p12" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$RUNNER_TEMP/release.keychain-db"
+          security list-keychain -d user -s "$RUNNER_TEMP/release.keychain-db" login.keychain-db
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$RUNNER_TEMP/release.keychain-db"
 
-    - name: Build Universal App
-      run: |
-        # 创建目录结构
-        mkdir -p dist/MacVimSwitch.app/Contents/{MacOS,Resources}
+      - name: Prepare App Store Connect key
+        env:
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+        run: |
+          test -n "$ASC_PRIVATE_KEY_BASE64"
+          echo "$ASC_PRIVATE_KEY_BASE64" | /usr/bin/base64 -D > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
 
-        # 复制 Info.plist 和应用图标
-        cp Info.plist dist/MacVimSwitch.app/Contents/
-        if [ -f "AppIcon.icns" ]; then
-          cp AppIcon.icns dist/MacVimSwitch.app/Contents/Resources/
-          echo "已复制应用图标到资源文件夹"
-        else
-          echo "警告：未找到 AppIcon.icns 文件，将使用默认图标"
-        fi
+      - name: Build and sign app
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION#v}"
+          IDENTITY="$(security find-identity -v -p codesigning "$RUNNER_TEMP/release.keychain-db" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+          test -n "$IDENTITY"
+          VERSION="$VERSION" SIGNING_IDENTITY="$IDENTITY" ./build.sh
+          codesign --verify --deep --strict --verbose=2 dist/MacVimSwitch.app
 
-        # 构建 ARM64 版本
-        echo "构建 ARM64 版本..."
-        swiftc -o dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-arm64 \
-          inputsource.swift \
-          CustomShortcutManager.swift \
-          main.swift \
-          AppDelegate.swift \
-          AppSelectionWindowController.swift \
-          StatusBarManager.swift \
-          InputMethodManager.swift \
-          UserPreferences.swift \
-          LaunchManager.swift \
-          UpdateManager.swift \
-          -framework Cocoa \
-          -framework Carbon \
-          -target arm64-apple-macos11 \
-          -sdk $(xcrun --show-sdk-path) \
-          -O \
-          -whole-module-optimization \
-          -Xlinker -rpath \
-          -Xlinker @executable_path/../Frameworks
+      - name: Notarize app
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          ditto -c -k --keepParent dist/MacVimSwitch.app "$RUNNER_TEMP/MacVimSwitch.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/MacVimSwitch.zip" \
+            --key "$RUNNER_TEMP/AuthKey.p8" \
+            --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" \
+            --wait
+          xcrun stapler staple dist/MacVimSwitch.app
+          xcrun stapler validate dist/MacVimSwitch.app
 
-        # 构建 x86_64 版本
-        echo "构建 x86_64 版本..."
-        swiftc -o dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-x86_64 \
-          inputsource.swift \
-          CustomShortcutManager.swift \
-          main.swift \
-          AppDelegate.swift \
-          AppSelectionWindowController.swift \
-          StatusBarManager.swift \
-          InputMethodManager.swift \
-          UserPreferences.swift \
-          LaunchManager.swift \
-          UpdateManager.swift \
-          -framework Cocoa \
-          -framework Carbon \
-          -target x86_64-apple-macos11 \
-          -sdk $(xcrun --show-sdk-path) \
-          -O \
-          -whole-module-optimization \
-          -Xlinker -rpath \
-          -Xlinker @executable_path/../Frameworks
+      - name: Create and notarize DMG
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          IDENTITY="$(security find-identity -v -p codesigning "$RUNNER_TEMP/release.keychain-db" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+          mkdir "$RUNNER_TEMP/dmg-root"
+          cp -R dist/MacVimSwitch.app "$RUNNER_TEMP/dmg-root/"
+          ln -s /Applications "$RUNNER_TEMP/dmg-root/Applications"
+          hdiutil create -volname MacVimSwitch -srcfolder "$RUNNER_TEMP/dmg-root" -ov -format UDZO MacVimSwitch.dmg
+          codesign --force --sign "$IDENTITY" --timestamp MacVimSwitch.dmg
+          xcrun notarytool submit MacVimSwitch.dmg \
+            --key "$RUNNER_TEMP/AuthKey.p8" \
+            --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" \
+            --wait
+          xcrun stapler staple MacVimSwitch.dmg
+          xcrun stapler validate MacVimSwitch.dmg
+          shasum -a 256 MacVimSwitch.dmg > SHA256SUMS.txt
 
-        # 合并为通用二进制
-        echo "合并为通用二进制..."
-        lipo -create \
-          dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-arm64 \
-          dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-x86_64 \
-          -output dist/MacVimSwitch.app/Contents/MacOS/macvimswitch
-
-        # 清理临时文件
-        rm dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-arm64
-        rm dist/MacVimSwitch.app/Contents/MacOS/macvimswitch-x86_64
-
-    - name: Create Info.plist
-      run: |
-        VERSION="${GITHUB_REF_NAME#v}"
-        cat > dist/MacVimSwitch.app/Contents/Info.plist << EOF
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>CFBundleExecutable</key>
-            <string>macvimswitch</string>
-            <key>CFBundleIconFile</key>
-            <string>AppIcon</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.jackiexiao.macvimswitch</string>
-            <key>CFBundleName</key>
-            <string>MacVimSwitch</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleShortVersionString</key>
-            <string>${VERSION}</string>
-            <key>CFBundleVersion</key>
-            <string>${VERSION}</string>
-            <key>LSMinimumSystemVersion</key>
-            <string>11.0</string>
-            <key>LSUIElement</key>
-            <true/>
-            <key>NSHighResolutionCapable</key>
-            <true/>
-            <key>LSApplicationCategoryType</key>
-            <string>public.app-category.utilities</string>
-            <key>NSPrincipalClass</key>
-            <string>NSApplication</string>
-            <key>NSAppleEventsUsageDescription</key>
-            <string>MacVimSwitch needs to control system events to manage input sources.</string>
-            <key>NSAppleScriptEnabled</key>
-            <true/>
-            <key>NSAccessibilityUsageDescription</key>
-            <string>MacVimSwitch needs accessibility access to monitor keyboard events.</string>
-        </dict>
-        </plist>
-        EOF
-
-    - name: Create Entitlements
-      run: |
-        cat > entitlements.plist << 'EOF'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>com.apple.security.automation.apple-events</key>
-            <true/>
-            <key>com.apple.security.temporary-exception.apple-events</key>
-            <array>
-                <string>com.apple.systemevents</string>
-            </array>
-            <key>com.apple.security.cs.allow-jit</key>
-            <true/>
-            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-            <true/>
-            <key>com.apple.security.cs.disable-library-validation</key>
-            <true/>
-        </dict>
-        </plist>
-        EOF
-
-    - name: Sign Application
-      run: |
-        # 设置执行权限
-        chmod +x dist/MacVimSwitch.app/Contents/MacOS/macvimswitch
-        
-        # 使用更安全的签名方式
-        # 移除属性标签（避免 quarantine 问题）
-        xattr -cr dist/MacVimSwitch.app
-        
-        # 使用 adhoc 签名（比完全自签名更安全）
-        codesign --force --deep --sign - --entitlements entitlements.plist \
-          --options runtime --timestamp dist/MacVimSwitch.app
-        
-        # 验证签名
-        codesign --verify --verbose dist/MacVimSwitch.app
-        
-        # 显示签名信息
-        codesign -dv dist/MacVimSwitch.app
-
-    - name: Create DMG
-      run: |
-        # 创建临时挂载点
-        mkdir -p /tmp/dmg
-        # 创建应用程序文件夹符号链接
-        ln -s /Applications /tmp/dmg/Applications
-        # 复制应用
-        cp -r dist/MacVimSwitch.app /tmp/dmg/
-        # 创建 DMG
-        hdiutil create -volname "MacVimSwitch" -srcfolder /tmp/dmg -ov -format UDZO MacVimSwitch.dmg
-        # 清理
-        rm -rf /tmp/dmg
-
-    - name: Calculate SHA256
-      run: |
-        echo "DMG_SHA256=$(shasum -a 256 MacVimSwitch.dmg | cut -d ' ' -f 1)" >> $GITHUB_ENV
-
-    - name: Get Tag Message
-      id: tag
-      run: |
-        tag_message=$(git tag -l --format='%(contents)' ${{ github.ref_name }})
-        echo "message<<EOF" >> $GITHUB_OUTPUT
-        echo "$tag_message" >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: MacVimSwitch.dmg
-        body: |
-          ${{ steps.tag.outputs.message }}
-
-          Universal Binary (支持 Intel 和 Apple Silicon Mac)
-
-          ## 安装方法（重要）：
-          
-          **由于 macOS 安全策略，初次安装可能需要以下步骤：**
-          
-          ### 方法1：标准安装（推荐）
-          1. 双击打开 DMG 文件
-          2. 将 MacVimSwitch 拖入 Applications 文件夹
-          3. **右键点击** MacVimSwitch.app → 选择 "打开"
-          4. 点击 "打开" 确认信任该应用
-          
-          ### 方法2：命令行解除（高级用户）
-          ```bash
-          # 在终端中运行（请修改为实际路径）
-          sudo xattr -rd com.apple.quarantine /Applications/MacVimSwitch.app
-          ```
-          
-          ### 系统设置步骤：
-          1. 初次安装需要在系统设置中授予辅助功能权限
-          2. 升级时直接替换 `/Applications/MacVimSwitch.app` 即可
-          3. 如果升级后快捷键没有生效，再删除旧的辅助功能权限项并重新添加
-
-          SHA256: ${{ env.DMG_SHA256 }}
-
-          You can verify the SHA256 checksum of the DMG file using:
-          ```bash
-          shasum -a 256 MacVimSwitch.dmg
-          ```
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            MacVimSwitch.dmg \
+            SHA256SUMS.txt \
+            --title "MacVimSwitch $GITHUB_REF_NAME" \
+            --notes-file "release-notes/$GITHUB_REF_NAME.md"

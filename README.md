@@ -21,26 +21,12 @@ MacVimSwitch 是一个 macOS 输入法切换工具，专为 Vim 用户和经常�
 
 <img width="383" alt="Image" src="https://github.com/user-attachments/assets/0eb4b7a0-c229-4334-b1ff-cd78dd477196" />
 
-## 已知问题
+## v0.7.6 重要改进
 
-### 1. 插入模式输入法切换
-现在从正常模式切回插入模式，无法自动切换回之前的输入法，默认是英文。见 [issue](https://github.com/Jackiexiao/macvimswitch/issues/6)
-
-我个人的解决方法是：按一下 shift 切换回中文，习惯了也还行，因为写代码的时候进入插入模式不切换为中文也挺常见。
-
-### 2. 更新后需要重新授权辅助功能
-**问题描述：** 下载新版本 MacVimSwitch 后，需要重新授予辅助功能权限
-
-**原因：** 由于应用使用自签名（而非 Apple Developer 证书），每次构建的签名标识都不同，macOS 会将其识别为不同的应用，因此需要重新授权
-
-**解决步骤：**
-1. 打开 系统设置 → 隐私与安全性 → 辅助功能
-2. 删除旧的 MacVimSwitch 条目（点击 `-` 按钮）
-3. 添加新的 MacVimSwitch（点击 `+` 按钮，选择新版本的应用）
-4. 确保开关已打开
-5. 重启 MacVimSwitch 应用
-
-**未来计划：** 如果有好心人愿意资助 Apple Developer 账号（$99/年），我会使用正式证书签名，这样更新时就不需要重新授权了 😄
+- Shift 现在通过 macOS 原生“选择上一个输入源”恢复之前的 CJKV 输入法和完整文本输入会话，修复“菜单栏已切换、实际仍输入英文”的问题。
+- 更新检查不再依赖容易限流的 GitHub API，发现新版后可直接下载最新版 DMG。
+- 发布包开始使用 Developer ID Application 正式签名并经过 Apple 公证，Bundle ID 继续保持为 `com.jackiexiao.macvimswitch`。
+- 从 v0.7.6 升级到后续正式签名版本时，不应再反复请求辅助功能授权。由于旧版本是 ad-hoc 签名，第一次从 v0.7.5 或更早版本迁移时仍可能需要重新授权一次。
 
 ## 安装方法
 

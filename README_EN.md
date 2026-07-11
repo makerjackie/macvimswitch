@@ -20,26 +20,12 @@ MacVimSwitch is a utility for macOS that automatically switches input sources, d
 
 <img width="383" alt="Image" src="https://github.com/user-attachments/assets/0eb4b7a0-c229-4334-b1ff-cd78dd477196" />
 
-## Known Issues
+## Important changes in v0.7.6
 
-### 1. Insert Mode Input Method Switching
-When switching back to insert mode from normal mode, it cannot automatically switch back to the previous input method - it defaults to English. See [issue](https://github.com/Jackiexiao/macvimswitch/issues/6)
-
-My personal solution is to press shift to switch back to Chinese. After getting used to it, it works fine, especially since it's quite common to stay in English input method when entering insert mode for coding.
-
-### 2. Accessibility Permission Required After Updates
-**Issue:** After downloading a new version of MacVimSwitch, you need to re-grant accessibility permissions
-
-**Reason:** The app uses self-signing (rather than an Apple Developer certificate), so each build has a different signature identity. macOS treats it as a different application, requiring re-authorization
-
-**Solution Steps:**
-1. Open System Settings → Privacy & Security → Accessibility
-2. Remove the old MacVimSwitch entry (click the `-` button)
-3. Add the new MacVimSwitch (click the `+` button and select the new version)
-4. Ensure the toggle is enabled
-5. Restart the MacVimSwitch app
-
-**Future Plan:** If someone kind would sponsor an Apple Developer account ($99/year), I'll sign with an official certificate so updates won't require re-authorization 😄
+- Shift now restores the previous CJKV input source through macOS's native “Select the previous input source” shortcut, including the active text-input session. This fixes cases where the menu bar changed but typing remained English.
+- Update checks no longer depend on GitHub's rate-limited anonymous API and now link directly to the latest DMG.
+- Releases are signed with Developer ID Application, notarized by Apple, and keep the Bundle ID `com.jackiexiao.macvimswitch`.
+- Upgrades after v0.7.6 should retain Accessibility permission. Moving from v0.7.5 or an older ad-hoc-signed build may require one final authorization because its signing identity is different.
 
 ## Installation
 

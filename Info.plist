@@ -4,17 +4,29 @@
 <dict>
     <key>CFBundleIdentifier</key>
     <string>com.jackiexiao.macvimswitch</string>
+    <key>CFBundleExecutable</key>
+    <string>macvimswitch</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleName</key>
     <string>MacVimSwitch</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.7.5</string>
+    <string>0.7.6</string>
     <key>CFBundleVersion</key>
-    <string>0.7.5</string>
+    <string>0.7.6</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>MacVimSwitch needs accessibility access to monitor keyboard events.</string>
 </dict>
 </plist>

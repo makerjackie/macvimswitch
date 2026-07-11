@@ -30,7 +30,7 @@ class InputSource: Equatable {
     }
 
     @discardableResult
-    func select() -> Bool {
+    func select(useSystemPreviousShortcut: Bool = true) -> Bool {
         let startedAt = CFAbsoluteTimeGetCurrent()
         let currentSource = InputSourceManager.getCurrentSource()
         if currentSource.id == self.id {
@@ -41,13 +41,17 @@ class InputSource: Equatable {
 
         let success: Bool
         if self.isCJKV {
-            success = switchCJKVSource()
+            success = switchCJKVSource(
+                useSystemPreviousShortcut: useSystemPreviousShortcut
+            )
         } else {
             success = selectDirectlyWithRetry()
         }
         logResult(
             success: success,
-            strategy: self.isCJKV ? "system-previous-with-tis-fallback" : "direct",
+            strategy: self.isCJKV && useSystemPreviousShortcut
+                ? "system-previous-with-tis-fallback"
+                : "direct",
             startedAt: startedAt
         )
         return success
@@ -73,16 +77,19 @@ class InputSource: Equatable {
         return false
     }
 
-    private func switchCJKVSource() -> Bool {
+    private func switchCJKVSource(useSystemPreviousShortcut: Bool) -> Bool {
         // ESC just moved from this CJKV source to the configured English
         // source, so macOS already has the exact target in its previous-source
         // history. Let the system restore that text-input session directly.
-        if InputSourceManager.selectPreviousInputSource() {
+        if useSystemPreviousShortcut,
+           InputSourceManager.selectPreviousInputSource() {
             usleep(InputSourceManager.systemShortcutSettleUSeconds)
             return true
         }
 
-        print("系统输入法快捷键恢复未确认，回退到 TIS: \(id)")
+        if useSystemPreviousShortcut {
+            print("系统输入法快捷键恢复未确认，回退到 TIS: \(id)")
+        }
 
         for attempt in 1...InputSourceManager.cjkvMaxAttempts {
             let status = TISSelectInputSource(tisInputSource)
@@ -407,6 +414,7 @@ class KeyboardManager {
     private static let SHIFT_DOUBLE_TAP_WINDOW: TimeInterval = 0.32
     private static let SHIFT_SOURCE_SWITCH_DELAY: TimeInterval = 0.01
     private var suppressNextCtrlOpenBracketKeyUp = false
+    private var canRestoreLastInputSourceWithSystemShortcut = false
 
     private init() {
         // 从 UserPreferences 加载配置
@@ -597,10 +605,14 @@ class KeyboardManager {
             // 从英文切换到保存的输入法
             if let lastSource = lastInputSource,
                let targetSource = InputSourceManager.getInputSource(name: lastSource) {
-                guard targetSource.select() else {
+                let useSystemShortcut = canRestoreLastInputSourceWithSystemShortcut
+                guard targetSource.select(
+                    useSystemPreviousShortcut: useSystemShortcut
+                ) else {
                     print("切换到保存的输入法失败: \(lastSource)")
                     return
                 }
+                canRestoreLastInputSourceWithSystemShortcut = false
             }
         } else {
             // 从其他输入法切换到英文
@@ -611,6 +623,7 @@ class KeyboardManager {
                     print("切换到英文输入法失败: \(englishInputSource)")
                     return
                 }
+                canRestoreLastInputSourceWithSystemShortcut = true
             }
         }
 
@@ -642,6 +655,7 @@ class KeyboardManager {
                 lastInputSource = currentSource.id
                 print("⌨️ 保存上一个输入法: \(currentSource.id)")
                 if englishSource.select() {
+                    canRestoreLastInputSourceWithSystemShortcut = true
                     notifyStateUpdated()
                     print("⌨️ 已切换到英文输入法")
                 } else {
@@ -844,11 +858,12 @@ class KeyboardManager {
 
     func setLastInputSource(_ sourceId: String) {
         lastInputSource = sourceId
+        canRestoreLastInputSourceWithSystemShortcut = false
         // 保存到 UserPreferences
         UserPreferences.shared.selectedInputMethod = sourceId
         DispatchQueue.main.async {
             if let source = InputSourceManager.getInputSource(name: sourceId) {
-                _ = source.select()
+                _ = source.select(useSystemPreviousShortcut: false)
             }
         }
     }
