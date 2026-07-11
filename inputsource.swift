@@ -31,32 +31,37 @@ class InputSource: Equatable {
 
     @discardableResult
     func select() -> Bool {
+        let startedAt = CFAbsoluteTimeGetCurrent()
         let currentSource = InputSourceManager.getCurrentSource()
         if currentSource.id == self.id {
-            if self.isCJKV {
-                usleep(InputSourceManager.cjkvSettleUSeconds)
-            }
-            InputSourceManager.forceRefreshInputContext()
-            return InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 80_000)
+            let success = InputSourceManager.waitUntilCurrentSourceStable(id: self.id)
+            logResult(success: success, strategy: "already-selected", startedAt: startedAt)
+            return success
         }
 
+        let success: Bool
         if self.isCJKV {
-            return switchCJKVSource()
+            success = switchCJKVSource()
         } else {
-            return selectWithRetry()
+            success = selectDirectlyWithRetry()
         }
+        logResult(
+            success: success,
+            strategy: self.isCJKV ? "system-previous-with-tis-fallback" : "direct",
+            startedAt: startedAt
+        )
+        return success
     }
 
-    private func selectWithRetry(maxAttempts: Int = 3) -> Bool {
+    private func selectDirectlyWithRetry(maxAttempts: Int = 3) -> Bool {
         for attempt in 1...maxAttempts {
             let status = TISSelectInputSource(tisInputSource)
             if status != noErr {
                 print("切换输入法失败: \(id), status=\(status), attempt=\(attempt)")
             }
 
-            if InputSourceManager.waitUntilCurrentSource(id: self.id) {
-                InputSourceManager.forceRefreshInputContext()
-                return InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 120_000)
+            if InputSourceManager.waitUntilCurrentSourceStable(id: self.id) {
+                return true
             }
 
             if attempt < maxAttempts {
@@ -69,42 +74,59 @@ class InputSource: Equatable {
     }
 
     private func switchCJKVSource() -> Bool {
-        if selectWithRetry(maxAttempts: 2) {
+        // ESC just moved from this CJKV source to the configured English
+        // source, so macOS already has the exact target in its previous-source
+        // history. Let the system restore that text-input session directly.
+        if InputSourceManager.selectPreviousInputSource() {
+            usleep(InputSourceManager.systemShortcutSettleUSeconds)
             return true
         }
 
-        if let nonCJKV = InputSourceManager.nonCJKVSource() {
-            print("直接切换 CJKV 输入法未确认，尝试通过 \(nonCJKV.id) 中转")
-            _ = TISSelectInputSource(nonCJKV.tisInputSource)
-            _ = InputSourceManager.waitUntilCurrentSource(id: nonCJKV.id, timeoutUseconds: 120_000)
+        print("系统输入法快捷键恢复未确认，回退到 TIS: \(id)")
 
-            for attempt in 1...3 {
-                let status = TISSelectInputSource(tisInputSource)
-                if status != noErr {
-                    print("CJKV 中转切换失败: \(id), status=\(status), attempt=\(attempt)")
-                }
-
-                if InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 220_000) {
-                    usleep(InputSourceManager.cjkvSettleUSeconds)
-                    guard InputSourceManager.getCurrentSource().id == self.id else {
-                        continue
-                    }
-
-                    InputSourceManager.forceRefreshInputContext()
-                    return InputSourceManager.waitUntilCurrentSource(id: self.id, timeoutUseconds: 120_000)
-                }
-
-                usleep(InputSourceManager.retryDelayUSeconds)
+        for attempt in 1...InputSourceManager.cjkvMaxAttempts {
+            let status = TISSelectInputSource(tisInputSource)
+            if status != noErr {
+                print("CJKV 切换失败: \(id), status=\(status), attempt=\(attempt)")
             }
 
-            if InputSourceManager.getCurrentSource().id == self.id {
-                InputSourceManager.forceRefreshInputContext()
+            if status == noErr,
+               InputSourceManager.waitUntilCurrentSource(id: id),
+               InputSourceManager.waitUntilCurrentSourceStable(
+                    id: id,
+                    stableUseconds: InputSourceManager.cjkvSettleUSeconds
+               ) {
+                InputSourceManager.postInputContextRefreshPulse()
                 return true
+            }
+
+            if attempt < InputSourceManager.cjkvMaxAttempts,
+               let bridge = InputSourceManager.nonCJKVSource(excluding: id) {
+                print("CJKV 切换未稳定，通过 \(bridge.id) 重建输入上下文")
+                _ = TISSelectInputSource(bridge.tisInputSource)
+                _ = InputSourceManager.waitUntilCurrentSource(
+                    id: bridge.id,
+                    timeoutUseconds: 160_000
+                )
+                usleep(InputSourceManager.retryDelayUSeconds)
             }
         }
 
         print("CJKV 输入法切换未确认成功: \(id)")
         return false
+    }
+
+    private func logResult(success: Bool, strategy: String, startedAt: CFAbsoluteTime) {
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1_000
+        print(
+            String(
+                format: "[InputSwitch] target=%@ strategy=%@ success=%@ elapsed=%.1fms",
+                id,
+                strategy,
+                success ? "true" : "false",
+                elapsedMs
+            )
+        )
     }
 }
 
@@ -114,6 +136,8 @@ class InputSourceManager {
     static var uSeconds: UInt32 = 20_000
     static var retryDelayUSeconds: UInt32 = 45_000
     static var cjkvSettleUSeconds: UInt32 = 80_000
+    static var systemShortcutSettleUSeconds: UInt32 = 60_000
+    static var cjkvMaxAttempts: Int = 3
     static var keyboardOnly: Bool = true
 
     static func initialize() {
@@ -138,28 +162,8 @@ class InputSourceManager {
         return inputSources.first(where: { $0.id == name })
     }
 
-    static func nonCJKVSource() -> InputSource? {
-        return inputSources.first(where: { !$0.isCJKV })
-    }
-
-    static func selectPrevious() {
-        let shortcut = getSelectPreviousShortcut()
-        if (shortcut == nil) {
-            print("Shortcut to select previous input source does not exist")
-            return
-        }
-
-        let src = CGEventSource(stateID: .hidSystemState)
-        let key = CGKeyCode(shortcut!.0)
-        let flag = CGEventFlags(rawValue: shortcut!.1)
-
-        let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true)!
-        down.flags = flag
-        down.post(tap: .cghidEventTap)
-
-        let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false)!
-        up.post(tap: .cghidEventTap)
-        usleep(uSeconds)
+    static func nonCJKVSource(excluding excludedID: String? = nil) -> InputSource? {
+        return inputSources.first(where: { !$0.isCJKV && $0.id != excludedID })
     }
 
     static func getSelectPreviousShortcut() -> (Int, UInt64)? {
@@ -174,6 +178,34 @@ class InputSourceManager {
 
         return ((parameters[1] as! NSNumber).intValue,
                 (parameters[2] as! NSNumber).uint64Value)
+    }
+
+    @discardableResult
+    static func selectPreviousInputSource() -> Bool {
+        guard let shortcut = getSelectPreviousShortcut(),
+              let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(shortcut.0),
+                keyDown: true
+              ),
+              let up = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(shortcut.0),
+                keyDown: false
+              ) else {
+            return false
+        }
+
+        let flags = CGEventFlags(rawValue: shortcut.1)
+        down.flags = flags
+        up.flags = flags
+        down.setIntegerValueField(.eventSourceUserData, value: 0x4D5653)
+        up.setIntegerValueField(.eventSourceUserData, value: 0x4D5653)
+        down.post(tap: .cghidEventTap)
+        usleep(20_000)
+        up.post(tap: .cghidEventTap)
+        return true
     }
 
     static func isCJKVSource(_ source: InputSource) -> Bool {
@@ -206,13 +238,56 @@ class InputSourceManager {
         return false
     }
 
-    static func forceRefreshInputContext() {
-        let current = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+    static func waitUntilCurrentSourceStable(
+        id: String,
+        timeoutUseconds: UInt32 = 240_000,
+        stableUseconds: UInt32 = 30_000,
+        pollIntervalUseconds: UInt32 = 10_000
+    ) -> Bool {
+        var waited: UInt32 = 0
+        var stableFor: UInt32 = 0
 
-        _ = TISSelectInputSource(current)
-        usleep(5_000)
-        _ = TISSelectInputSource(current)
-        usleep(10_000)
+        while waited <= timeoutUseconds {
+            if getCurrentSource().id == id {
+                stableFor += pollIntervalUseconds
+                if stableFor >= stableUseconds {
+                    return true
+                }
+            } else {
+                stableFor = 0
+            }
+
+            usleep(pollIntervalUseconds)
+            waited += pollIntervalUseconds
+        }
+
+        return false
+    }
+
+    static func postInputContextRefreshPulse() {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 0x3F,
+                keyDown: true
+              ),
+              let up = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: 0x3F,
+                keyDown: false
+              ) else {
+            return
+        }
+
+        down.type = .flagsChanged
+        down.flags = .maskSecondaryFn
+        up.type = .flagsChanged
+        up.flags = []
+        down.setIntegerValueField(.eventSourceUserData, value: 0x4D5653)
+        up.setIntegerValueField(.eventSourceUserData, value: 0x4D5653)
+        down.post(tap: .cghidEventTap)
+        usleep(1_000)
+        up.post(tap: .cghidEventTap)
     }
 }
 
@@ -330,6 +405,7 @@ class KeyboardManager {
     private var pendingShiftSwitchScheduledAt: TimeInterval = 0
     private var shouldSkipCurrentShiftRelease = false
     private static let SHIFT_DOUBLE_TAP_WINDOW: TimeInterval = 0.32
+    private static let SHIFT_SOURCE_SWITCH_DELAY: TimeInterval = 0.01
     private var suppressNextCtrlOpenBracketKeyUp = false
 
     private init() {
@@ -402,6 +478,11 @@ class KeyboardManager {
     private let eventCallback: CGEventTapCallBack = { proxy, type, event, refcon in
         guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
         let manager = Unmanaged<KeyboardManager>.fromOpaque(refcon).takeUnretainedValue()
+
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            manager.reenableEventTap(reason: type)
+            return Unmanaged.passUnretained(event)
+        }
 
         switch type {
         case .keyDown:
@@ -502,6 +583,14 @@ class KeyboardManager {
     }
 
     func switchInputMethod() {
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + KeyboardManager.SHIFT_SOURCE_SWITCH_DELAY
+        ) { [weak self] in
+            self?.performSwitchInputMethod()
+        }
+    }
+
+    private func performSwitchInputMethod() {
         let currentSource = InputSourceManager.getCurrentSource()
 
         if currentSource.id == englishInputSource {
@@ -525,7 +614,7 @@ class KeyboardManager {
             }
         }
 
-        delegate?.keyboardManagerDidUpdateState()
+        notifyStateUpdated()
     }
 
     private func updateLastInputSource(_ currentSource: InputSource) {
@@ -538,6 +627,12 @@ class KeyboardManager {
 
     // 添加新方法：专门用于ESC键的切换
     func switchToEnglish() {
+        DispatchQueue.main.async { [weak self] in
+            self?.performSwitchToEnglish()
+        }
+    }
+
+    private func performSwitchToEnglish() {
         print("⌨️ KeyboardManager: 开始切换到英文输入法")
         if let englishSource = InputSourceManager.getInputSource(name: englishInputSource) {
             let currentSource = InputSourceManager.getCurrentSource()
@@ -547,7 +642,7 @@ class KeyboardManager {
                 lastInputSource = currentSource.id
                 print("⌨️ 保存上一个输入法: \(currentSource.id)")
                 if englishSource.select() {
-                    delegate?.keyboardManagerDidUpdateState()
+                    notifyStateUpdated()
                     print("⌨️ 已切换到英文输入法")
                 } else {
                     print("⚠️ 英文输入法切换未确认成功: \(englishInputSource)")
@@ -749,11 +844,13 @@ class KeyboardManager {
 
     func setLastInputSource(_ sourceId: String) {
         lastInputSource = sourceId
-        if let source = InputSourceManager.getInputSource(name: sourceId) {
-            source.select()
-        }
         // 保存到 UserPreferences
         UserPreferences.shared.selectedInputMethod = sourceId
+        DispatchQueue.main.async {
+            if let source = InputSourceManager.getInputSource(name: sourceId) {
+                _ = source.select()
+            }
+        }
     }
 
     // 添加新的辅助方法来处理 CJKV 输入法切换
@@ -789,6 +886,18 @@ class KeyboardManager {
     func disableEventTap() {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
+        }
+    }
+
+    private func reenableEventTap(reason: CGEventType) {
+        guard let tap = eventTap else { return }
+        print("⚠️ 键盘事件监听被系统禁用，立即恢复: \(reason.rawValue)")
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func notifyStateUpdated() {
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.keyboardManagerDidUpdateState()
         }
     }
 
