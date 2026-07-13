@@ -22,6 +22,16 @@ class StatusBarManager {
             return
         }
 
+        if KeyboardManager.shared.isInputSourceSwitchInProgress {
+            button.image = NSImage(
+                systemSymbolName: "arrow.triangle.2.circlepath",
+                accessibilityDescription: "正在切换到中文输入法"
+            )
+            button.toolTip = "正在切换到中文输入法…可以继续输入"
+            button.isEnabled = true
+            return
+        }
+
         let enabledShortcuts = KeyboardManager.shared.getEnabledCustomShortcuts()
         if enabledShortcuts.isEmpty {
             button.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "MacVimSwitch")
@@ -29,6 +39,7 @@ class StatusBarManager {
             button.image = NSImage(systemSymbolName: "keyboard.badge.ellipsis", accessibilityDescription: "MacVimSwitch (\(enabledShortcuts.count) shortcuts enabled)")
         }
 
+        button.toolTip = "MacVimSwitch"
         button.isEnabled = true
     }
 

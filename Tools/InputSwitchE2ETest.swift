@@ -4,7 +4,10 @@ import Foundation
 
 private let iterations = Int(CommandLine.arguments.dropFirst().first ?? "30") ?? 30
 private let cjkvTypingDelayMs = Int(CommandLine.arguments.dropFirst(2).first ?? "160") ?? 160
-private let useDirectTIS = CommandLine.arguments.dropFirst(3).first == "direct"
+private let switchMode = CommandLine.arguments.dropFirst(3).first ?? "confirmed"
+private let useDirectTIS = switchMode == "direct"
+private let typeBeforeSourceConfirmation = switchMode == "eager" || switchMode == "burst"
+private let typeBurstBeforeSourceConfirmation = switchMode == "burst"
 
 private func inputSource(withID id: String) -> TISInputSource {
     let filter = [kTISPropertyInputSourceID as String: id] as CFDictionary
@@ -113,6 +116,7 @@ private func textEditApplication() -> NSRunningApplication {
     if let running = NSRunningApplication.runningApplications(
         withBundleIdentifier: "com.apple.TextEdit"
     ).first {
+        running.activate(options: [.activateAllWindows])
         return running
     }
 
@@ -140,6 +144,17 @@ private func textEditApplication() -> NSRunningApplication {
 private let textEdit = textEditApplication()
 private let textEditAX = AXUIElementCreateApplication(textEdit.processIdentifier)
 
+private func activateTextEdit() {
+    textEdit.activate(options: [.activateAllWindows])
+    for _ in 0..<100 {
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.TextEdit" {
+            return
+        }
+        usleep(5_000)
+    }
+    fatalError("TextEdit did not become the frontmost application")
+}
+
 private func focusedTextEditElement() -> AXUIElement {
     var value: CFTypeRef?
     let status = AXUIElementCopyAttributeValue(
@@ -154,6 +169,7 @@ private func focusedTextEditElement() -> AXUIElement {
 }
 
 private func focusEmptyTextEditDocument() {
+    activateTextEdit()
     var focused: AXUIElement?
     for _ in 0..<100 {
         var value: CFTypeRef?
@@ -249,24 +265,44 @@ for iteration in 1...iterations {
     }
 
     focusEmptyTextEditDocument()
+    let cjkvSwitchStartedAt = CFAbsoluteTimeGetCurrent()
     if useDirectTIS {
         selectDirectly(cjkvInputSource)
     } else {
         postSingleShift() // A single Shift toggles back to the saved CJKV source.
     }
-    guard let cjkvElapsed = waitForInputSource("豆包输入法") else {
+    if typeBeforeSourceConfirmation {
+        usleep(useconds_t(cjkvTypingDelayMs * 1_000))
+        if typeBurstBeforeSourceConfirmation {
+            // "nihao ": simulate a user continuing to type without waiting for the input-source indicator.
+            for keyCode: CGKeyCode in [0x2D, 0x22, 0x04, 0x00, 0x1F, 0x31] {
+                postKey(keyCode)
+                usleep(4_000)
+            }
+        } else {
+            postKey(0x00) // Type immediately after releasing Shift.
+        }
+    }
+    guard waitForInputSource("豆包输入法") != nil else {
         failures.append("iteration \(iteration): CJKV source timeout, current=\(globalInputSourceDescription())")
         continue
     }
-    cjkvLatencies.append(cjkvElapsed * 1_000)
-    usleep(useconds_t(cjkvTypingDelayMs * 1_000))
-    postKey(0x00) // a
-    usleep(60_000)
-    postKey(0x31) // space, committing the first Chinese candidate
+    cjkvLatencies.append((CFAbsoluteTimeGetCurrent() - cjkvSwitchStartedAt) * 1_000)
+    if !typeBeforeSourceConfirmation {
+        usleep(useconds_t(cjkvTypingDelayMs * 1_000))
+        postKey(0x00) // a
+    }
+    if !typeBurstBeforeSourceConfirmation {
+        usleep(60_000)
+        postKey(0x31) // space, committing the first Chinese candidate
+    }
     usleep(200_000)
     let cjkvText = textEditContents()
-    if cjkvText.unicodeScalars.allSatisfy({ $0.isASCII }) {
-        failures.append("iteration \(iteration): CJKV functional check got ASCII \(cjkvText.debugDescription)")
+    let leakedASCII = cjkvText.unicodeScalars.contains {
+        $0.isASCII && CharacterSet.letters.contains($0)
+    }
+    if leakedASCII || cjkvText.unicodeScalars.allSatisfy({ $0.isASCII }) {
+        failures.append("iteration \(iteration): CJKV first key leaked as ASCII \(cjkvText.debugDescription)")
     }
 }
 
