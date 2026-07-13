@@ -4,5 +4,6 @@ macvimswitch
 temp*
 .DS_Store
 dist*
+release/
 MacVimSwitch.dmg
 macism.swift

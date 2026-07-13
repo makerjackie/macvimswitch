@@ -59,5 +59,6 @@ xcrun stapler staple "$DMG_PATH"
 xcrun stapler validate "$DMG_PATH"
 spctl -a -vv --type open --context context:primary-signature "$DMG_PATH"
 
-shasum -a 256 "$DMG_PATH" | tee "$RELEASE_DIR/SHA256SUMS.txt"
+(cd "$RELEASE_DIR" && shasum -a 256 "$(basename "$DMG_PATH")") |
+    tee "$RELEASE_DIR/SHA256SUMS.txt"
 echo "发布包已生成：$DMG_PATH"

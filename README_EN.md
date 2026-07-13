@@ -20,6 +20,13 @@ MacVimSwitch is a utility for macOS that automatically switches input sources, d
 
 <img width="383" alt="Image" src="https://github.com/user-attachments/assets/0eb4b7a0-c229-4334-b1ff-cd78dd477196" />
 
+## Important changes in v0.7.7
+
+- Fixed the first keystroke occasionally leaking to ABC after Shift switches back to a CJKV input source.
+- Keyboard events are now buffered during the transition and replayed in order after the target input source is stable, so typing can continue immediately after Shift.
+- The menu bar briefly shows a switching indicator during the roughly 0.1–0.2 second transition.
+- v0.7.6 users can detect this release at startup or through “Check for Updates,” and the download button opens the latest DMG directly.
+
 ## Important changes in v0.7.6
 
 - Shift now restores the previous CJKV input source through macOS's native “Select the previous input source” shortcut, including the active text-input session. This fixes cases where the menu bar changed but typing remained English.
